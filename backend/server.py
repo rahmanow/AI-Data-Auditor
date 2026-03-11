@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import io
 import base64
 import json
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from openai import AsyncOpenAI
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -386,9 +386,9 @@ async def upload_file(file: UploadFile = File(...)):
 async def get_ai_insights(request: AIInsightsRequest):
     """Get AI-powered explanations and recommendations"""
     try:
-        api_key = os.environ.get('EMERGENT_LLM_KEY')
+        api_key = os.environ.get('OPENAI_API_KEY')
         if not api_key:
-            raise HTTPException(status_code=500, detail="AI service not configured")
+            raise HTTPException(status_code=500, detail="AI service not configured. Please set OPENAI_API_KEY.")
         
         analysis_data = request.analysis_data
         
@@ -425,19 +425,23 @@ Please provide your analysis in the following JSON format:
 }}
 """
         
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"dqa-{request.analysis_id}",
-            system_message="You are a data quality expert. Provide clear, actionable insights for improving data quality. Always respond with valid JSON."
-        ).with_model("openai", "gpt-5.2")
+        client = AsyncOpenAI(api_key=api_key)
         
-        user_message = UserMessage(text=context)
-        response = await chat.send_message(user_message)
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a data quality expert. Provide clear, actionable insights for improving data quality. Always respond with valid JSON."},
+                {"role": "user", "content": context}
+            ],
+            temperature=0.7,
+            max_tokens=2000
+        )
+        
+        response_text = response.choices[0].message.content.strip()
         
         # Parse the response
         try:
             # Try to extract JSON from the response
-            response_text = response.strip()
             if response_text.startswith('```json'):
                 response_text = response_text[7:]
             if response_text.startswith('```'):
@@ -454,7 +458,7 @@ Please provide your analysis in the following JSON format:
         except json.JSONDecodeError:
             # If JSON parsing fails, return the raw response
             return AIInsightsResponse(
-                explanation=response,
+                explanation=response_text,
                 recommendations=["Review the data quality issues identified above", "Address missing values first", "Remove or cap outliers based on business context"],
                 cleaning_suggestions={}
             )
