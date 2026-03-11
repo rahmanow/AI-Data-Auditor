@@ -1,11 +1,9 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from mangum import Mangum
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 import uuid
-from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -27,17 +25,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure matplotlib
 plt.rcParams.update({
     'font.family': 'sans-serif',
-    'axes.edgecolor': '#e2e8f0',
-    'axes.labelcolor': '#64748b',
-    'text.color': '#0f172a',
     'figure.facecolor': '#ffffff',
     'axes.facecolor': '#ffffff',
 })
 
-# Models
 class IssueDetail(BaseModel):
     column: str
     count: int
@@ -70,78 +63,71 @@ class CleanDataRequest(BaseModel):
     analysis_id: str
     cleaning_options: Dict[str, str]
 
-# In-memory storage
 analysis_store: Dict[str, Any] = {}
 df_store: Dict[str, pd.DataFrame] = {}
 
-def detect_missing_values(df: pd.DataFrame) -> List[IssueDetail]:
+def detect_missing(df):
     missing = []
     for col in df.columns:
-        count = df[col].isna().sum()
+        count = int(df[col].isna().sum())
         if count > 0:
-            percentage = (count / len(df)) * 100
-            missing.append(IssueDetail(
-                column=col, count=int(count), percentage=round(percentage, 2),
-                examples=[f"Row {i}" for i in df[df[col].isna()].index.tolist()[:5]]
-            ))
+            missing.append(IssueDetail(column=col, count=count, 
+                percentage=round((count/len(df))*100, 2),
+                examples=[f"Row {i}" for i in df[df[col].isna()].index.tolist()[:5]]))
     return missing
 
-def detect_outliers(df: pd.DataFrame) -> List[IssueDetail]:
+def detect_outliers(df):
     outliers = []
     for col in df.select_dtypes(include=[np.number]).columns:
         data = df[col].dropna()
         if len(data) > 3:
             Q1, Q3 = data.quantile(0.25), data.quantile(0.75)
             IQR = Q3 - Q1
-            mask = (data < Q1 - 1.5 * IQR) | (data > Q3 + 1.5 * IQR)
-            count = mask.sum()
+            mask = (data < Q1 - 1.5*IQR) | (data > Q3 + 1.5*IQR)
+            count = int(mask.sum())
             if count > 0:
-                outliers.append(IssueDetail(
-                    column=col, count=int(count),
-                    percentage=round((count / len(data)) * 100, 2),
-                    examples=[round(v, 2) for v in data[mask].head(5).tolist()]
-                ))
+                outliers.append(IssueDetail(column=col, count=count,
+                    percentage=round((count/len(data))*100, 2),
+                    examples=[round(float(v),2) for v in data[mask].head(5).tolist()]))
     return outliers
 
-def detect_duplicates(df: pd.DataFrame) -> Dict[str, Any]:
-    dup = df.duplicated().sum()
-    return {"total_duplicates": int(dup), "percentage": round((dup / len(df)) * 100, 2) if len(df) > 0 else 0,
-            "duplicate_row_indices": df[df.duplicated()].index.tolist()[:10]}
+def detect_dups(df):
+    dup = int(df.duplicated().sum())
+    return {"total_duplicates": dup, "percentage": round((dup/len(df))*100, 2) if len(df)>0 else 0,
+            "duplicate_row_indices": [int(i) for i in df[df.duplicated()].index.tolist()[:10]]}
 
-def detect_inconsistencies(df: pd.DataFrame) -> List[IssueDetail]:
-    inconsistencies = []
+def detect_incons(df):
+    incons = []
     for col in df.columns:
         data = df[col].dropna()
-        if len(data) == 0:
+        if len(data) == 0 or data.dtype != 'object':
             continue
-        if data.dtype == 'object':
-            try:
-                ws = (data.str.strip() != data).sum()
-                if ws > 0:
-                    inconsistencies.append(IssueDetail(column=col, count=int(ws),
-                        percentage=round((ws / len(data)) * 100, 2), examples=["Whitespace issues"]))
-            except:
-                pass
-    return inconsistencies
+        try:
+            ws = int((data.str.strip() != data).sum())
+            if ws > 0:
+                incons.append(IssueDetail(column=col, count=ws,
+                    percentage=round((ws/len(data))*100, 2), examples=["Whitespace"]))
+        except:
+            pass
+    return incons
 
-def compute_column_stats(df: pd.DataFrame) -> Dict[str, Any]:
+def compute_stats(df):
     stats = {}
     for col in df.columns:
         s = {"dtype": str(df[col].dtype), "non_null": int(df[col].count()),
              "null": int(df[col].isna().sum()), "unique": int(df[col].nunique())}
         if np.issubdtype(df[col].dtype, np.number) and not df[col].isna().all():
-            s.update({"mean": round(float(df[col].mean()), 2), "min": round(float(df[col].min()), 2),
-                     "max": round(float(df[col].max()), 2)})
+            s.update({"mean": round(float(df[col].mean()),2), 
+                     "min": round(float(df[col].min()),2), "max": round(float(df[col].max()),2)})
         stats[col] = s
     return stats
 
-def generate_charts(df: pd.DataFrame, missing: List[IssueDetail], outliers: List[IssueDetail]) -> Dict[str, str]:
+def gen_charts(df, missing, outliers):
     charts = {}
     
-    # Completeness
-    fig, ax = plt.subplots(figsize=(5, 5))
-    total, miss = df.size, df.isna().sum().sum()
-    ax.pie([total - miss, miss], labels=['Valid', 'Missing'], colors=['#10b981', '#ef4444'], autopct='%1.1f%%')
+    fig, ax = plt.subplots(figsize=(5,5))
+    total, miss = df.size, int(df.isna().sum().sum())
+    ax.pie([total-miss, miss], labels=['Valid','Missing'], colors=['#10b981','#ef4444'], autopct='%1.1f%%')
     ax.set_title('Data Completeness')
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=80, bbox_inches='tight', facecolor='white')
@@ -149,11 +135,10 @@ def generate_charts(df: pd.DataFrame, missing: List[IssueDetail], outliers: List
     charts['completeness'] = base64.b64encode(buf.getvalue()).decode()
     plt.close()
     
-    # Summary
-    fig, ax = plt.subplots(figsize=(6, 4))
-    labels = ['Missing', 'Outliers', 'Duplicates']
-    values = [sum(m.count for m in missing), sum(o.count for o in outliers), df.duplicated().sum()]
-    ax.bar(labels, values, color=['#ef4444', '#f59e0b', '#6366f1'])
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.bar(['Missing','Outliers','Duplicates'], 
+           [sum(m.count for m in missing), sum(o.count for o in outliers), int(df.duplicated().sum())],
+           color=['#ef4444','#f59e0b','#6366f1'])
     ax.set_title('Issues Summary')
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=80, bbox_inches='tight', facecolor='white')
@@ -161,10 +146,9 @@ def generate_charts(df: pd.DataFrame, missing: List[IssueDetail], outliers: List
     charts['summary'] = base64.b64encode(buf.getvalue()).decode()
     plt.close()
     
-    # Distributions
     num_cols = df.select_dtypes(include=[np.number]).columns[:3]
     if len(num_cols) > 0:
-        fig, axes = plt.subplots(1, len(num_cols), figsize=(4 * len(num_cols), 3))
+        fig, axes = plt.subplots(1, len(num_cols), figsize=(4*len(num_cols), 3))
         if len(num_cols) == 1:
             axes = [axes]
         for ax, col in zip(axes, num_cols):
@@ -181,16 +165,16 @@ def generate_charts(df: pd.DataFrame, missing: List[IssueDetail], outliers: List
 
 def calc_score(df, missing, outliers, dups, incons):
     if df.size == 0:
-        return 0
+        return 0.0
     d1 = sum(m.count for m in missing) / df.size * 30
     d2 = sum(o.count for o in outliers) / df.size * 20
     d3 = dups['total_duplicates'] / len(df) * 25 if len(df) > 0 else 0
     d4 = len(incons) * 5
-    return max(0, min(100, round(100 - d1 - d2 - d3 - d4, 1)))
+    return max(0.0, min(100.0, round(100-d1-d2-d3-d4, 1)))
 
 @app.get("/api")
 @app.get("/api/")
-def root():
+async def root():
     return {"message": "Data Quality Auditor API"}
 
 @app.post("/api/upload")
@@ -199,7 +183,7 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(400, "No file")
     fn = file.filename.lower()
     if not any(fn.endswith(e) for e in ['.csv', '.xlsx', '.xls']):
-        raise HTTPException(400, "Only CSV/Excel supported")
+        raise HTTPException(400, "Only CSV/Excel")
     
     try:
         contents = await file.read()
@@ -207,17 +191,17 @@ async def upload_file(file: UploadFile = File(...)):
         if df.empty:
             raise HTTPException(400, "Empty file")
         
-        missing = detect_missing_values(df)
+        missing = detect_missing(df)
         outliers = detect_outliers(df)
-        dups = detect_duplicates(df)
-        incons = detect_inconsistencies(df)
+        dups = detect_dups(df)
+        incons = detect_incons(df)
         
         result = DataQualityResult(
             filename=file.filename, total_rows=len(df), total_columns=len(df.columns),
             quality_score=calc_score(df, missing, outliers, dups, incons),
             missing_values=missing, outliers=outliers, duplicates=dups,
-            inconsistencies=incons, column_stats=compute_column_stats(df),
-            charts=generate_charts(df, missing, outliers)
+            inconsistencies=incons, column_stats=compute_stats(df),
+            charts=gen_charts(df, missing, outliers)
         )
         analysis_store[result.id] = result.model_dump()
         df_store[result.id] = df
@@ -225,29 +209,27 @@ async def upload_file(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Error: {str(e)}")
+        raise HTTPException(500, str(e))
 
 @app.post("/api/ai-insights")
-def get_ai_insights(request: AIInsightsRequest):
+async def get_ai_insights(request: AIInsightsRequest):
     api_key = os.environ.get('OPENAI_API_KEY')
     if not api_key:
         raise HTTPException(500, "OPENAI_API_KEY not set")
     
     data = request.analysis_data
-    prompt = f"""Analyze this data quality report:
-- File: {data.get('filename')}, Rows: {data.get('total_rows')}, Score: {data.get('quality_score')}/100
-- Missing: {json.dumps(data.get('missing_values', []))}
-- Outliers: {json.dumps(data.get('outliers', []))}
-- Duplicates: {data.get('duplicates', {})}
-- Inconsistencies: {data.get('inconsistencies', [])}
-
-Return JSON: {{"explanation": "2-3 sentences", "recommendations": ["..."], "cleaning_suggestions": {{"col": "action"}}}}"""
+    prompt = f"""Analyze data quality report, return JSON only:
+File: {data.get('filename')}, Rows: {data.get('total_rows')}, Score: {data.get('quality_score')}/100
+Missing: {json.dumps(data.get('missing_values', []))}
+Outliers: {json.dumps(data.get('outliers', []))}
+Duplicates: {data.get('duplicates', {})}
+Return: {{"explanation": "2-3 sentences", "recommendations": ["..."], "cleaning_suggestions": {{"col": "action"}}}}"""
     
     try:
         client = OpenAI(api_key=api_key)
         resp = client.chat.completions.create(
             model="gpt-4o", messages=[
-                {"role": "system", "content": "Data quality expert. Return valid JSON only."},
+                {"role": "system", "content": "Data expert. JSON only."},
                 {"role": "user", "content": prompt}
             ], temperature=0.7, max_tokens=1500
         )
@@ -256,12 +238,12 @@ Return JSON: {{"explanation": "2-3 sentences", "recommendations": ["..."], "clea
             text = text.split('```')[1].replace('json', '').strip()
         return AIInsightsResponse(**json.loads(text))
     except Exception as e:
-        return AIInsightsResponse(explanation=f"Error: {str(e)}", recommendations=[], cleaning_suggestions={})
+        return AIInsightsResponse(explanation=str(e), recommendations=[], cleaning_suggestions={})
 
 @app.post("/api/clean-data")
-def clean_data(request: CleanDataRequest):
+async def clean_data(request: CleanDataRequest):
     if request.analysis_id not in df_store:
-        raise HTTPException(404, "Analysis not found")
+        raise HTTPException(404, "Not found")
     
     df = df_store[request.analysis_id].copy()
     changes = []
@@ -271,25 +253,25 @@ def clean_data(request: CleanDataRequest):
             if action == "yes":
                 before = len(df)
                 df = df.drop_duplicates()
-                changes.append(f"Removed {before - len(df)} duplicates")
+                changes.append(f"Removed {before-len(df)} dups")
             continue
         if col not in df.columns:
             continue
         if action == "drop_missing":
             before = len(df)
             df = df.dropna(subset=[col])
-            changes.append(f"Dropped {before - len(df)} rows")
+            changes.append(f"Dropped {before-len(df)} rows")
         elif action == "fill_mean" and np.issubdtype(df[col].dtype, np.number):
             df[col] = df[col].fillna(df[col].mean())
-            changes.append(f"Filled {col} with mean")
+            changes.append(f"Filled {col} mean")
         elif action == "fill_median" and np.issubdtype(df[col].dtype, np.number):
             df[col] = df[col].fillna(df[col].median())
-            changes.append(f"Filled {col} with median")
+            changes.append(f"Filled {col} median")
         elif action == "cap_outliers" and np.issubdtype(df[col].dtype, np.number):
             Q1, Q3 = df[col].quantile(0.25), df[col].quantile(0.75)
             IQR = Q3 - Q1
-            df[col] = df[col].clip(Q1 - 1.5 * IQR, Q3 + 1.5 * IQR)
-            changes.append(f"Capped {col} outliers")
+            df[col] = df[col].clip(Q1-1.5*IQR, Q3+1.5*IQR)
+            changes.append(f"Capped {col}")
         elif action == "strip_whitespace" and df[col].dtype == 'object':
             df[col] = df[col].str.strip()
             changes.append(f"Stripped {col}")
@@ -299,22 +281,22 @@ def clean_data(request: CleanDataRequest):
             "cleaned_rows": len(df), "preview": df.head(20).to_dict(orient='records')}
 
 @app.get("/api/download-cleaned/{analysis_id}")
-def download_cleaned(analysis_id: str):
+async def download_cleaned(analysis_id: str):
     key = f"{analysis_id}_cleaned"
     if key not in df_store:
         raise HTTPException(404, "Not found")
     buf = io.StringIO()
     df_store[key].to_csv(buf, index=False)
-    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
-                           headers={"Content-Disposition": f"attachment; filename=cleaned.csv"})
+    return Response(content=buf.getvalue(), media_type="text/csv",
+                   headers={"Content-Disposition": "attachment; filename=cleaned.csv"})
 
 @app.get("/api/download-report/{analysis_id}")
-def download_report(analysis_id: str):
+async def download_report(analysis_id: str):
     if analysis_id not in analysis_store:
         raise HTTPException(404, "Not found")
     report = {k: v for k, v in analysis_store[analysis_id].items() if k != 'charts'}
-    return StreamingResponse(iter([json.dumps(report, indent=2, default=str)]), media_type="application/json",
-                           headers={"Content-Disposition": "attachment; filename=report.json"})
+    return Response(content=json.dumps(report, indent=2, default=str), media_type="application/json",
+                   headers={"Content-Disposition": "attachment; filename=report.json"})
 
-# Vercel serverless handler
-handler = Mangum(app, lifespan="off")
+# For Vercel
+handler = app

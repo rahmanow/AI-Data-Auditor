@@ -1,23 +1,15 @@
 {
   "version": 2,
-  "builds": [
-    {
-      "src": "frontend/package.json",
-      "use": "@vercel/static-build",
-      "config": {
-        "distDir": "build"
-      }
-    },
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
+  "framework": null,
+  "buildCommand": "cd frontend && yarn install && yarn build",
+  "outputDirectory": "frontend/build",
+  "functions": {
+    "api/index.py": {
+      "runtime": "@vercel/python@4.3.1",
+      "maxDuration": 60
     }
-  ],
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/index.py" },
-    { "src": "/static/(.*)", "dest": "/frontend/static/$1" },
-    { "src": "/favicon.ico", "dest": "/frontend/favicon.ico" },
-    { "src": "/manifest.json", "dest": "/frontend/manifest.json" },
-    { "src": "/(.*)", "dest": "/frontend/index.html" }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index.py" }
   ]
 }
